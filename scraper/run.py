@@ -58,18 +58,18 @@ def fetch_all_unit_pages(base_url: str):
     Henter alle enheter fra et prosjekt.
 
     Strategi:
-    1. Hent HTML på vanlig måte for å få meta-info (tittel, adresse, finn-kode,
-       sist endret, salgstrinn).
-    2. Bruk Playwright til å hente komplett enhetsliste på tvers av paginering.
-    3. Hvis Playwright feiler/ikke installert: fall tilbake til HTML-parsing
-       (gir bare side 1, men bedre enn ingenting).
+    1. Hent HTML på vanlig måte for å få meta-info og side-1 enheter.
+    2. Hvis HTML har < 14 enheter: ferdig (Finn viser 15 per side, så <14
+       betyr garantert ingen paginering).
+    3. Hvis HTML har ≥ 14 enheter: bruk Playwright for å klikke gjennom
+       pagineringssidene og hente full liste.
+    4. Hvis Playwright feiler/ikke installert: fall tilbake til HTML.
 
     Returnerer Project-objekt eller None ved feil.
     """
     from .parser import parse_project_page, Unit
-    from .playwright_scraper import fetch_units_with_playwright
 
-    # Hent meta fra HTML
+    # Hent meta + side 1 fra HTML
     html = fetch(base_url)
     if not html:
         return None
@@ -77,7 +77,14 @@ def fetch_all_unit_pages(base_url: str):
     project = parse_project_page(html, source_url=base_url)
     html_units = list(project.units)
 
-    # Prøv Playwright for komplett enhetsliste
+    # Hopp over Playwright hvis prosjektet er lite nok til at paginering
+    # garantert ikke gjelder
+    if len(html_units) < 14:
+        logger.info(f"  {len(html_units)} enheter (under terskel — ingen paginering)")
+        return project
+
+    # Stor nok til at paginering kan være aktiv — bruk Playwright
+    from .playwright_scraper import fetch_units_with_playwright
     pw_units_dicts = fetch_units_with_playwright(base_url)
 
     if pw_units_dicts is None:
@@ -86,20 +93,14 @@ def fetch_all_unit_pages(base_url: str):
         return project
 
     if len(pw_units_dicts) <= len(html_units):
-        # Playwright ga ikke mer enn HTML
-        if len(html_units) >= 15:
-            logger.warning(
-                f"  Playwright ga bare {len(pw_units_dicts)} enheter (samme som HTML). "
-                f"Pagineringsknapp ble ikke klikket — kan mangle data."
-            )
-        else:
-            logger.info(f"  {len(html_units)} enheter (ingen paginering)")
+        logger.warning(
+            f"  Playwright ga bare {len(pw_units_dicts)} enheter (samme som HTML). "
+            f"Pagineringsknapp ble ikke klikket — kan mangle data."
+        )
         return project
 
     # Playwright ga mer data — bytt ut units
     logger.info(f"  Playwright fant {len(pw_units_dicts)} enheter (vs {len(html_units)} i HTML)")
-
-    # Playwright ga mer data — bytt ut units
     project.units = [
         Unit(
             unit_id=u["unit_id"],
