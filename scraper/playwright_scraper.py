@@ -49,6 +49,7 @@ def fetch_units_with_playwright(url: str, max_pages: int = 20,
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 ),
                 locale="nb-NO",
+                viewport={"width": 1400, "height": 2400},  # Høy nok til at paginering ofte er synlig
             )
             page = context.new_page()
 
@@ -59,7 +60,7 @@ def fetch_units_with_playwright(url: str, max_pages: int = 20,
                 browser.close()
                 return None
 
-            # Aksepter cookies hvis det dukker opp en banner
+            # Aksepter cookies (Finn bruker Sourcepoint-iframe)
             _try_accept_cookies(page)
 
             # Vent på at enhetstabellen rendres
@@ -109,8 +110,38 @@ def fetch_units_with_playwright(url: str, max_pages: int = 20,
 
 
 def _try_accept_cookies(page) -> None:
-    """Klikk vekk cookie-banner hvis den finnes."""
+    """
+    Aksepter cookie-banneren. Finn bruker Sourcepoint som lever i en iframe
+    (sp_message_iframe_*). Vi må gå inn i iframen for å klikke.
+    """
+    # Vent litt på at banner laster
+    page.wait_for_timeout(1500)
+
+    # Strategi 1: Sourcepoint iframe
+    try:
+        for frame in page.frames:
+            if "sourcepoint" in (frame.url or "").lower() or \
+               "cmpv2.finn.no" in (frame.url or "") or \
+               "consent" in (frame.url or "").lower():
+                # Inne i iframen, finn aksepter-knappen
+                for label in ["Godta alle", "Godta", "Aksepter alle", "Aksepter",
+                              "Accept all", "Accept", "Tillat alle", "Tillat",
+                              "Jeg godtar", "Samtykker"]:
+                    try:
+                        btn = frame.locator(f'button:has-text("{label}")').first
+                        if btn.count() > 0:
+                            btn.click(timeout=3000)
+                            logger.info(f"    Cookie-banner: klikket '{label}' i iframe")
+                            page.wait_for_timeout(800)
+                            return
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.debug(f"Iframe cookie-håndtering feilet: {e}")
+
+    # Strategi 2: vanlige selektorer på hovedsiden
     selectors = [
+        'button:has-text("Godta alle")',
         'button:has-text("Godta")',
         'button:has-text("Aksepter")',
         'button:has-text("Accept")',
@@ -120,9 +151,10 @@ def _try_accept_cookies(page) -> None:
     for sel in selectors:
         try:
             btn = page.locator(sel).first
-            if btn.is_visible(timeout=1500):
+            if btn.count() > 0 and btn.is_visible(timeout=1000):
                 btn.click(timeout=2000)
-                page.wait_for_timeout(400)
+                logger.info(f"    Cookie-banner: klikket via {sel}")
+                page.wait_for_timeout(500)
                 return
         except Exception:
             continue
@@ -254,20 +286,20 @@ def _click_next_page(page) -> bool:
                 if is_disabled is not None or aria_disabled == "true":
                     logger.info("    Strategi 1: Neste side er disabled, vi er på siste")
                     return False
-                next_btn.scroll_into_view_if_needed(timeout=2000)
-                next_btn.click(timeout=3000)
+                # Aktivt scroll til knappen via JS, deretter klikk med force
+                next_btn.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+                page.wait_for_timeout(300)
+                next_btn.click(timeout=3000, force=True)
                 page.wait_for_timeout(700)
                 logger.info("    Strategi 1: klikket Neste side")
                 return True
     except Exception as e:
         logger.info(f"    Strategi 1 feilet: {e}")
 
-    # Strategi 2: aria-label-basert generelt (utenfor nav-konteksten)
+    # Strategi 2: aria-label-basert utenfor nav. Bare på selve "Neste side"
+    # (ikke generelle "Neste" som matcher galleri-pilen)
     selectors = [
         'button[aria-label="Neste side"]',
-        'button[aria-label*="Neste" i]',
-        'button[aria-label*="next" i]',
-        'a[aria-label*="Neste" i]',
     ]
     for sel in selectors:
         try:
@@ -278,8 +310,9 @@ def _click_next_page(page) -> bool:
                 continue
             if btn.get_attribute("aria-disabled") == "true":
                 continue
-            btn.scroll_into_view_if_needed(timeout=2000)
-            btn.click(timeout=3000)
+            btn.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+            page.wait_for_timeout(300)
+            btn.click(timeout=3000, force=True)
             page.wait_for_timeout(700)
             logger.info(f"    Strategi 2: klikket via '{sel}'")
             return True
@@ -343,8 +376,9 @@ def _click_next_page(page) -> bool:
                 f'nav[aria-labelledby="Enhetsvelger"] a:has-text("{next_num}")'
             ).first
             if btn.count() > 0:
-                btn.scroll_into_view_if_needed(timeout=2000)
-                btn.click(timeout=3000)
+                btn.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+                page.wait_for_timeout(300)
+                btn.click(timeout=3000, force=True)
                 page.wait_for_timeout(700)
                 logger.info(f"    Strategi 3: klikket på nummer {next_num}")
                 return True
