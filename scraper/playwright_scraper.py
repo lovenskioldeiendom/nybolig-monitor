@@ -218,6 +218,29 @@ def _click_next_page(page) -> bool:
 
     Returnerer True hvis vi klikket, False hvis ikke (= vi er på siste side).
     """
+    # Diagnostikk: hva ser vi i nav?
+    try:
+        diag = page.evaluate(r"""
+        () => {
+          const nav = document.querySelector('nav[aria-labelledby="Enhetsvelger"]');
+          if (!nav) return {found: false};
+          const buttons = nav.querySelectorAll('button, a');
+          return {
+            found: true,
+            count: buttons.length,
+            buttons: Array.from(buttons).map(b => ({
+              text: b.textContent.trim().slice(0, 20),
+              aria_label: b.getAttribute('aria-label'),
+              aria_current: b.getAttribute('aria-current'),
+              disabled: b.disabled || b.hasAttribute('disabled'),
+            }))
+          };
+        }
+        """)
+        logger.info(f"    nav-diag: {diag}")
+    except Exception as e:
+        logger.info(f"    nav-diag feilet: {e}")
+
     # Strategi 1: direkte nav-basert. Inne i nav[aria-labelledby="Enhetsvelger"]
     # finner vi den siste knappen — det er "Neste side"-knappen.
     try:
@@ -229,15 +252,17 @@ def _click_next_page(page) -> bool:
                 is_disabled = next_btn.get_attribute("disabled")
                 aria_disabled = next_btn.get_attribute("aria-disabled")
                 if is_disabled is not None or aria_disabled == "true":
+                    logger.info("    Strategi 1: Neste side er disabled, vi er på siste")
                     return False
                 next_btn.scroll_into_view_if_needed(timeout=2000)
                 next_btn.click(timeout=3000)
                 page.wait_for_timeout(700)
+                logger.info("    Strategi 1: klikket Neste side")
                 return True
     except Exception as e:
-        logger.debug(f"Strategi 1 feilet: {e}")
+        logger.info(f"    Strategi 1 feilet: {e}")
 
-    # Strategi 2: aria-label-basert generelt
+    # Strategi 2: aria-label-basert generelt (utenfor nav-konteksten)
     selectors = [
         'button[aria-label="Neste side"]',
         'button[aria-label*="Neste" i]',
@@ -249,7 +274,6 @@ def _click_next_page(page) -> bool:
             btn = page.locator(sel).first
             if btn.count() == 0:
                 continue
-            # Sjekk disabled
             if btn.get_attribute("disabled") is not None:
                 continue
             if btn.get_attribute("aria-disabled") == "true":
@@ -257,9 +281,10 @@ def _click_next_page(page) -> bool:
             btn.scroll_into_view_if_needed(timeout=2000)
             btn.click(timeout=3000)
             page.wait_for_timeout(700)
+            logger.info(f"    Strategi 2: klikket via '{sel}'")
             return True
         except Exception as e:
-            logger.debug(f"Strategi 2 ({sel}) feilet: {e}")
+            logger.info(f"    Strategi 2 ({sel}) feilet: {e}")
             continue
 
     # Strategi 3: numerisk navigasjon — finn aktiv side, klikk neste tall.
@@ -321,8 +346,14 @@ def _click_next_page(page) -> bool:
                 btn.scroll_into_view_if_needed(timeout=2000)
                 btn.click(timeout=3000)
                 page.wait_for_timeout(700)
+                logger.info(f"    Strategi 3: klikket på nummer {next_num}")
                 return True
+            else:
+                logger.info(f"    Strategi 3: fant next_num={next_num} men ingen knapp")
+        else:
+            logger.info("    Strategi 3: next_num=None (sannsynligvis siste side)")
     except Exception as e:
-        logger.debug(f"Strategi 3 feilet: {e}")
+        logger.info(f"    Strategi 3 feilet: {e}")
 
+    logger.info("    Ingen strategi virket — gir opp paginering")
     return False
