@@ -82,14 +82,22 @@ def fetch_all_unit_pages(base_url: str):
 
     if pw_units_dicts is None:
         # Playwright feilet — bruk HTML-parsing (kun side 1)
-        logger.info(f"  Bruker HTML-parsing ({len(html_units)} enheter)")
+        logger.info(f"  Playwright ga ingen data, bruker HTML-parsing ({len(html_units)} enheter)")
         return project
 
     if len(pw_units_dicts) <= len(html_units):
-        # Playwright ga ikke mer enn HTML — behold HTML (Unit-objekter er
-        # mer komplette og har finn_url for hver enhet)
-        logger.info(f"  HTML-parsing ga {len(html_units)} enheter, beholder den")
+        # Playwright ga ikke mer enn HTML
+        if len(html_units) >= 15:
+            logger.warning(
+                f"  Playwright ga bare {len(pw_units_dicts)} enheter (samme som HTML). "
+                f"Pagineringsknapp ble ikke klikket — kan mangle data."
+            )
+        else:
+            logger.info(f"  {len(html_units)} enheter (ingen paginering)")
         return project
+
+    # Playwright ga mer data — bytt ut units
+    logger.info(f"  Playwright fant {len(pw_units_dicts)} enheter (vs {len(html_units)} i HTML)")
 
     # Playwright ga mer data — bytt ut units
     project.units = [
