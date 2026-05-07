@@ -53,57 +53,57 @@ def fetch(url: str) -> str | None:
         return None
 
 
-def fetch_all_unit_pages(base_url: str) -> list:
+def fetch_all_unit_pages(base_url: str):
     """
-    Henter alle enheter fra et prosjekt på tvers av paginerte sider.
+    Henter alle enheter fra et prosjekt.
 
-    Finn paginerer enhetstabellen med `&page=N`-parameter. Vi prøver page=1, 2, 3...
-    inntil siden ikke gir nye enheter (enten fordi det ikke finnes mer, eller fordi
-    paginering ikke gjelder enhetstabellen for denne URL-en).
+    Strategi:
+    1. Hent HTML på vanlig måte for å få meta-info (tittel, adresse, finn-kode,
+       sist endret, salgstrinn).
+    2. Bruk Playwright til å hente komplett enhetsliste på tvers av paginering.
+    3. Hvis Playwright feiler/ikke installert: fall tilbake til HTML-parsing
+       (gir bare side 1, men bedre enn ingenting).
 
-    Returnerer kombinert liste med Unit-objekter, deduplisert på unit_id.
+    Returnerer Project-objekt eller None ved feil.
     """
-    from .parser import parse_project_page
+    from .parser import parse_project_page, Unit
+    from .playwright_scraper import fetch_units_with_playwright
 
-    seen_unit_ids = set()
-    all_units = []
-    project_meta = None
+    # Hent meta fra HTML
+    html = fetch(base_url)
+    if not html:
+        return None
 
-    for page in range(1, 21):  # Hardgrense på 20 sider for sikkerhet
-        # Bygg URL for denne siden
-        sep = "&" if "?" in base_url else "?"
-        page_url = base_url if page == 1 else f"{base_url}{sep}page={page}"
+    project = parse_project_page(html, source_url=base_url)
+    html_units = list(project.units)
 
-        html = fetch(page_url)
-        if not html:
-            break
+    # Prøv Playwright for komplett enhetsliste
+    pw_units_dicts = fetch_units_with_playwright(base_url)
 
-        project = parse_project_page(html, source_url=page_url)
-        if project_meta is None:
-            project_meta = project  # Behold meta fra side 1
+    if pw_units_dicts is None:
+        # Playwright feilet — bruk HTML-parsing (kun side 1)
+        logger.info(f"  Bruker HTML-parsing ({len(html_units)} enheter)")
+        return project
 
-        new_count = 0
-        for u in project.units:
-            if u.unit_id not in seen_unit_ids:
-                seen_unit_ids.add(u.unit_id)
-                all_units.append(u)
-                new_count += 1
+    if len(pw_units_dicts) <= len(html_units):
+        # Playwright ga ikke mer enn HTML — behold HTML (Unit-objekter er
+        # mer komplette og har finn_url for hver enhet)
+        logger.info(f"  HTML-parsing ga {len(html_units)} enheter, beholder den")
+        return project
 
-        # Hvis ingen nye enheter på denne siden, vi er ferdige
-        if new_count == 0:
-            break
-
-        # Hvis page=1 har færre enn 15 enheter, paginering er sannsynligvis ikke aktiv
-        if page == 1 and len(project.units) < 15:
-            break
-
-        # Snill mot Finn mellom pagineringssider
-        if page > 1:
-            time.sleep(DELAY_BETWEEN_REQUESTS_S)
-
-    if project_meta:
-        project_meta.units = all_units
-    return project_meta
+    # Playwright ga mer data — bytt ut units
+    project.units = [
+        Unit(
+            unit_id=u["unit_id"],
+            floor=u.get("floor"),
+            bra_m2=u.get("bra_m2"),
+            bedrooms=u.get("bedrooms"),
+            total_price=u.get("total_price"),
+            sold=u.get("sold", False),
+        )
+        for u in pw_units_dicts
+    ]
+    return project
 
 
 def gather_project_urls(municipality: dict) -> list[str]:
