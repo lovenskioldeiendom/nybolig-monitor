@@ -53,6 +53,59 @@ def fetch(url: str) -> str | None:
         return None
 
 
+def fetch_all_unit_pages(base_url: str) -> list:
+    """
+    Henter alle enheter fra et prosjekt på tvers av paginerte sider.
+
+    Finn paginerer enhetstabellen med `&page=N`-parameter. Vi prøver page=1, 2, 3...
+    inntil siden ikke gir nye enheter (enten fordi det ikke finnes mer, eller fordi
+    paginering ikke gjelder enhetstabellen for denne URL-en).
+
+    Returnerer kombinert liste med Unit-objekter, deduplisert på unit_id.
+    """
+    from .parser import parse_project_page
+
+    seen_unit_ids = set()
+    all_units = []
+    project_meta = None
+
+    for page in range(1, 21):  # Hardgrense på 20 sider for sikkerhet
+        # Bygg URL for denne siden
+        sep = "&" if "?" in base_url else "?"
+        page_url = base_url if page == 1 else f"{base_url}{sep}page={page}"
+
+        html = fetch(page_url)
+        if not html:
+            break
+
+        project = parse_project_page(html, source_url=page_url)
+        if project_meta is None:
+            project_meta = project  # Behold meta fra side 1
+
+        new_count = 0
+        for u in project.units:
+            if u.unit_id not in seen_unit_ids:
+                seen_unit_ids.add(u.unit_id)
+                all_units.append(u)
+                new_count += 1
+
+        # Hvis ingen nye enheter på denne siden, vi er ferdige
+        if new_count == 0:
+            break
+
+        # Hvis page=1 har færre enn 15 enheter, paginering er sannsynligvis ikke aktiv
+        if page == 1 and len(project.units) < 15:
+            break
+
+        # Snill mot Finn mellom pagineringssider
+        if page > 1:
+            time.sleep(DELAY_BETWEEN_REQUESTS_S)
+
+    if project_meta:
+        project_meta.units = all_units
+    return project_meta
+
+
 def gather_project_urls(municipality: dict) -> list[str]:
     """
     Henter alle project-URLer for en kommune ved å pagine gjennom søket.
@@ -95,23 +148,26 @@ def scrape_municipality(municipality: dict, dry_run: bool = False,
 
     for i, url in enumerate(project_urls, 1):
         logger.info(f"[{municipality['name']}] {i}/{len(project_urls)}: {url}")
-        html = fetch(url)
-        if not html:
+
+        try:
+            project = fetch_all_unit_pages(url)
+        except Exception as e:
+            logger.warning(f"Feil for {url}: {e}")
             summary["errors"] += 1
             continue
 
-        try:
-            project = parse_project_page(
-                html, source_url=url, municipality_hint=municipality["name"]
-            )
-        except Exception as e:
-            logger.warning(f"Parse-feil for {url}: {e}")
+        if project is None:
             summary["errors"] += 1
             continue
+
+        # Sett kommune (ikke automatisk fra paginering)
+        project.municipality = municipality["name"]
 
         if not project.units:
             logger.info(f"[{municipality['name']}] ingen enheter funnet, hopper over")
             continue
+
+        logger.info(f"[{municipality['name']}]   → {len(project.units)} enheter totalt")
 
         if not dry_run:
             try:
