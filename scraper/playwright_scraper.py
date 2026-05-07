@@ -194,67 +194,93 @@ def _click_next_page(page) -> bool:
     """
     Prøver å klikke 'neste side'-knappen for enhetstabellen.
 
-    Returnerer True hvis vi klikket, False hvis ikke (= vi er på siste side).
+    Finn-strukturen er typisk:
+        <nav aria-labelledby="Enhetsvelger">
+          <div>
+            <button aria-current="page">1</button>
+            <button aria-current="false">2</button>
+            <button aria-current="false">3</button>
+          </div>
+          <button aria-label="Neste side">...</button>
+        </nav>
 
-    Strategi: lete etter SVG/knapp med arial-label/title som inneholder
-    "Neste" eller en typisk pil-til-høyre. Som fallback prøver vi å trykke
-    på en knapp med teksten "2", "3" osv. inne i pagineringskontainer.
+    Returnerer True hvis vi klikket, False hvis ikke (= vi er på siste side).
     """
-    # Prøv 1: knapp med aria-label "Neste"/"Next"
+    # Strategi 1: direkte nav-basert. Inne i nav[aria-labelledby="Enhetsvelger"]
+    # finner vi den siste knappen — det er "Neste side"-knappen.
+    try:
+        nav = page.locator('nav[aria-labelledby="Enhetsvelger"]').first
+        if nav.count() > 0:
+            next_btn = nav.locator('button[aria-label="Neste side"]').first
+            if next_btn.count() > 0:
+                # Sjekk at den er enabled (på siste side er den disabled)
+                is_disabled = next_btn.get_attribute("disabled")
+                aria_disabled = next_btn.get_attribute("aria-disabled")
+                if is_disabled is not None or aria_disabled == "true":
+                    return False
+                next_btn.scroll_into_view_if_needed(timeout=2000)
+                next_btn.click(timeout=3000)
+                page.wait_for_timeout(700)
+                return True
+    except Exception as e:
+        logger.debug(f"Strategi 1 feilet: {e}")
+
+    # Strategi 2: aria-label-basert generelt
     selectors = [
+        'button[aria-label="Neste side"]',
         'button[aria-label*="Neste" i]',
         'button[aria-label*="next" i]',
         'a[aria-label*="Neste" i]',
-        'button[title*="Neste" i]',
-        '[role="button"][aria-label*="Neste" i]',
     ]
     for sel in selectors:
         try:
             btn = page.locator(sel).first
-            if btn.count() > 0 and btn.is_visible(timeout=500) and btn.is_enabled(timeout=500):
+            if btn.count() == 0:
+                continue
+            # Sjekk disabled
+            if btn.get_attribute("disabled") is not None:
+                continue
+            if btn.get_attribute("aria-disabled") == "true":
+                continue
+            btn.scroll_into_view_if_needed(timeout=2000)
+            btn.click(timeout=3000)
+            page.wait_for_timeout(700)
+            return True
+        except Exception as e:
+            logger.debug(f"Strategi 2 ({sel}) feilet: {e}")
+            continue
+
+    # Strategi 3: numerisk navigasjon — finn aktiv side, klikk neste tall
+    try:
+        next_num = page.evaluate(r"""
+        () => {
+          const nav = document.querySelector('nav[aria-labelledby="Enhetsvelger"]');
+          if (!nav) return null;
+          const buttons = nav.querySelectorAll('button[aria-current]');
+          let current = 1;
+          let max = 1;
+          for (const b of buttons) {
+            const num = parseInt(b.textContent.trim(), 10);
+            if (!isNaN(num)) {
+              max = Math.max(max, num);
+              if (b.getAttribute('aria-current') === 'page') {
+                current = num;
+              }
+            }
+          }
+          return current < max ? current + 1 : null;
+        }
+        """)
+        if next_num:
+            btn = page.locator(
+                f'nav[aria-labelledby="Enhetsvelger"] button:has-text("{next_num}")'
+            ).first
+            if btn.count() > 0:
                 btn.scroll_into_view_if_needed(timeout=2000)
                 btn.click(timeout=3000)
                 page.wait_for_timeout(700)
                 return True
-        except Exception:
-            continue
-
-    # Prøv 2: bestem nåværende sidenummer og klikk neste
-    try:
-        # Finn aktiv side ved å lete etter "aria-current" eller en utheving
-        next_num = page.evaluate(r"""
-        () => {
-          // Søk etter pagineringselementer med tall
-          const pagers = document.querySelectorAll('[aria-label*="paginering" i], nav, ul');
-          for (const pager of pagers) {
-            const buttons = pager.querySelectorAll('button, a');
-            const labels = Array.from(buttons).map(b => b.textContent.trim());
-            const numbers = labels.filter(l => /^\d+$/.test(l));
-            if (numbers.length < 2) continue;
-            // Finn aktiv (aria-current="page" eller klasse "active")
-            let current = null;
-            buttons.forEach(b => {
-              if (b.getAttribute('aria-current') === 'page' || b.getAttribute('aria-current') === 'true' ||
-                  /^\d+$/.test(b.textContent.trim()) && b.getAttribute('disabled') !== null) {
-                current = parseInt(b.textContent.trim(), 10);
-              }
-            });
-            if (current === null) {
-              // Anta vi er på side 1 hvis ingen er markert som aktiv
-              current = 1;
-            }
-            return current + 1;
-          }
-          return null;
-        }
-        """)
-        if next_num:
-            btn = page.locator(f'button:has-text("{next_num}"), a:has-text("{next_num}")').first
-            if btn.count() > 0 and btn.is_visible(timeout=500):
-                btn.click(timeout=3000)
-                page.wait_for_timeout(700)
-                return True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Strategi 3 feilet: {e}")
 
     return False
