@@ -262,30 +262,60 @@ def _click_next_page(page) -> bool:
             logger.debug(f"Strategi 2 ({sel}) feilet: {e}")
             continue
 
-    # Strategi 3: numerisk navigasjon — finn aktiv side, klikk neste tall
+    # Strategi 3: numerisk navigasjon — finn aktiv side, klikk neste tall.
+    # Robust mot at aktiv knapp ikke alltid har aria-current.
     try:
         next_num = page.evaluate(r"""
         () => {
           const nav = document.querySelector('nav[aria-labelledby="Enhetsvelger"]');
           if (!nav) return null;
-          const buttons = nav.querySelectorAll('button[aria-current]');
-          let current = 1;
-          let max = 1;
-          for (const b of buttons) {
-            const num = parseInt(b.textContent.trim(), 10);
-            if (!isNaN(num)) {
-              max = Math.max(max, num);
-              if (b.getAttribute('aria-current') === 'page') {
-                current = num;
+          // Hent alle knapper som er rene tall (ikke "Neste side", "Forrige" etc)
+          const allButtons = nav.querySelectorAll('button, a');
+          const numberedButtons = [];
+          for (const b of allButtons) {
+            const text = b.textContent.trim();
+            if (/^\d+$/.test(text)) {
+              numberedButtons.push({ el: b, num: parseInt(text, 10) });
+            }
+          }
+          if (numberedButtons.length < 2) return null;
+
+          const max = Math.max(...numberedButtons.map(x => x.num));
+
+          // Aktiv side: enten aria-current="page", eller den som mangler
+          // aria-current mens andre har aria-current="false"
+          let current = null;
+          let othersHaveFalse = false;
+          for (const x of numberedButtons) {
+            const ac = x.el.getAttribute('aria-current');
+            if (ac === 'page' || ac === 'true') {
+              current = x.num;
+              break;
+            }
+            if (ac === 'false') {
+              othersHaveFalse = true;
+            }
+          }
+          // Hvis ingen er eksplisitt 'page', men noen er 'false', er den
+          // uten attributt sannsynligvis aktiv
+          if (current === null && othersHaveFalse) {
+            for (const x of numberedButtons) {
+              if (!x.el.hasAttribute('aria-current')) {
+                current = x.num;
+                break;
               }
             }
           }
+          // Siste utvei: anta side 1
+          if (current === null) current = 1;
+
           return current < max ? current + 1 : null;
         }
         """)
         if next_num:
             btn = page.locator(
-                f'nav[aria-labelledby="Enhetsvelger"] button:has-text("{next_num}")'
+                f'nav[aria-labelledby="Enhetsvelger"] button:has-text("{next_num}"), '
+                f'nav[aria-labelledby="Enhetsvelger"] a:has-text("{next_num}")'
             ).first
             if btn.count() > 0:
                 btn.scroll_into_view_if_needed(timeout=2000)
