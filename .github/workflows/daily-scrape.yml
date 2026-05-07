@@ -2,11 +2,13 @@ name: Daglig nyboligscraping
 
 on:
   schedule:
-    - cron: '0 5 * * *'  # 05:00 UTC = 06:00 norsk vintertid
+    - cron: '0 5 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   scrape:
@@ -37,3 +39,20 @@ jobs:
           git add nybolig.db dashboard/index.html
           git diff --staged --quiet || git commit -m "Daglig oppdatering $(date -u +%Y-%m-%d)"
           git push
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dashboard
+
+  deploy:
+    needs: scrape
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
