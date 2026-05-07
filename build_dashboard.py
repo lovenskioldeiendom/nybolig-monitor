@@ -19,6 +19,7 @@ from scraper.database import (
     get_current_units,
     get_recent_changes,
 )
+from scraper.geocode import get_cached, _NOT_FOUND
 
 OUT_DIR = Path(__file__).parent / "dashboard"
 OUT_FILE = OUT_DIR / "index.html"
@@ -35,6 +36,14 @@ def build_data() -> dict:
         units = get_current_units(finn_code)
         changes_week = get_recent_changes(finn_code, days_back=7)
         changes_month = get_recent_changes(finn_code, days_back=30)
+
+        # Hent koordinater fra cache (None hvis ikke geocodet eller ikke funnet)
+        lat = lng = None
+        if s["address"]:
+            cached = get_cached(s["address"])
+            if cached is not None and cached is not _NOT_FOUND:
+                lat = cached["lat"]
+                lng = cached["lng"]
 
         projects.append({
             "finn_code": finn_code,
@@ -57,6 +66,8 @@ def build_data() -> dict:
             "units": units,
             "changes_week": changes_week,
             "changes_month": changes_month,
+            "lat": lat,
+            "lng": lng,
         })
 
     projects.sort(key=lambda p: (p["municipality"] or "", p["title"] or ""))
@@ -74,6 +85,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nyboligprosjekter Akershus</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --bg: #ffffff;
@@ -179,6 +192,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .badge-sold { background: rgba(15, 110, 86, 0.15); color: var(--success); }
   .badge-up { background: rgba(163, 45, 45, 0.15); color: var(--danger); }
   .badge-down { background: rgba(15, 110, 86, 0.15); color: var(--success); }
+  /* Kart */
+  #map-card { display: none; }
+  #map-card.open { display: block; }
+  #map { height: 500px; border-radius: 8px; border: 1px solid var(--border); }
+  .map-toggle {
+    font-size: 13px; padding: 6px 12px; background: var(--bg-secondary);
+    color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; cursor: pointer;
+  }
+  .map-toggle:hover { background: var(--bg-tertiary); }
+  .map-popup { font-size: 13px; min-width: 180px; }
+  .map-popup .title { font-weight: 500; margin-bottom: 4px; }
+  .map-popup .muni-pill {
+    display: inline-block; font-size: 10px; padding: 1px 6px;
+    background: #f0f0f0; color: #555; border-radius: 8px;
+    margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .map-popup .stat-row { color: #555; margin: 2px 0; font-size: 12px; }
+  .map-popup a { display: inline-block; margin-top: 6px; font-size: 12px; }
+  .map-no-coords {
+    margin-top: 8px; font-size: 12px; color: var(--text-muted);
+  }
 </style>
 </head>
 <body>
@@ -192,12 +227,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <div class="stats" id="stats"></div>
 
+  <div class="card" id="map-card">
+    <h2 style="display: flex; align-items: center; justify-content: space-between;">
+      <span>Kart</span>
+      <span id="map-no-coords-msg" class="map-no-coords"></span>
+    </h2>
+    <div id="map"></div>
+  </div>
+
   <div class="card">
     <div class="controls">
       <select id="muni-filter">
         <option value="">Alle kommuner</option>
       </select>
       <input id="search" type="search" placeholder="Søk prosjekt..." style="flex: 1; min-width: 180px;">
+      <button id="map-toggle" class="map-toggle">Vis kart</button>
     </div>
     <div style="overflow-x: auto;">
       <table>
@@ -462,11 +506,118 @@ function init() {
   function update() {
     renderStats();
     renderTable();
+    if (mapInitialized) renderMapMarkers();
   }
 
   sel.addEventListener('change', update);
   document.getElementById('search').addEventListener('input', update);
+
+  // Kart-toggle
+  document.getElementById('map-toggle').addEventListener('click', toggleMap);
+
   update();
+}
+
+let mapInstance = null;
+let markerLayer = null;
+let mapInitialized = false;
+
+function toggleMap() {
+  const card = document.getElementById('map-card');
+  const btn = document.getElementById('map-toggle');
+  if (card.classList.contains('open')) {
+    card.classList.remove('open');
+    btn.textContent = 'Vis kart';
+    return;
+  }
+  card.classList.add('open');
+  btn.textContent = 'Skjul kart';
+
+  if (!mapInitialized) {
+    initMap();
+    mapInitialized = true;
+  } else {
+    // Tving Leaflet til å re-beregne størrelse
+    setTimeout(() => mapInstance.invalidateSize(), 100);
+  }
+  renderMapMarkers();
+}
+
+function initMap() {
+  // Standard senter: Oslo/Akershus
+  mapInstance = L.map('map').setView([59.91, 10.65], 10);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap',
+  }).addTo(mapInstance);
+  markerLayer = L.layerGroup().addTo(mapInstance);
+}
+
+function radiusForUnits(forSale) {
+  // Skalér 0-100+ enheter til 6-30 px diameter
+  if (!forSale || forSale <= 0) return 6;
+  const min = 6, max = 28;
+  const scaled = Math.sqrt(forSale) * 3;  // sqrt for å unngå at store dominerer
+  return Math.max(min, Math.min(max, scaled));
+}
+
+function colorForMuni(muni) {
+  // Gi hver kommune en distinkt farge
+  const colors = {
+    'Asker': '#1e88e5',
+    'Bærum': '#43a047',
+    'Nordre Follo': '#fb8c00',
+    'Ås': '#8e24aa',
+  };
+  return colors[muni] || '#666';
+}
+
+function renderMapMarkers() {
+  if (!mapInstance || !markerLayer) return;
+  markerLayer.clearLayers();
+
+  const projects = projectsFiltered();
+  const withCoords = projects.filter(p => p.lat && p.lng);
+  const without = projects.length - withCoords.length;
+
+  document.getElementById('map-no-coords-msg').textContent = without > 0
+    ? `${without} prosjekter mangler koordinater`
+    : '';
+
+  const bounds = [];
+  for (const p of withCoords) {
+    const r = radiusForUnits(p.units_for_sale);
+    const marker = L.circleMarker([p.lat, p.lng], {
+      radius: r,
+      fillColor: colorForMuni(p.municipality),
+      color: '#fff',
+      weight: 1.5,
+      opacity: 1,
+      fillOpacity: 0.75,
+    });
+    marker.bindPopup(buildPopupHtml(p));
+    marker.addTo(markerLayer);
+    bounds.push([p.lat, p.lng]);
+  }
+
+  // Zoom til synlige markører
+  if (bounds.length > 0) {
+    mapInstance.fitBounds(bounds, {padding: [40, 40], maxZoom: 13});
+  }
+}
+
+function buildPopupHtml(p) {
+  const ppm = p.avg_price_per_m2 ? fmt(p.avg_price_per_m2) + ' kr' : '–';
+  return `
+    <div class="map-popup">
+      <span class="muni-pill">${escapeHtml(p.municipality || '')}</span>
+      <div class="title">${escapeHtml(p.title || '—')}</div>
+      <div class="stat-row">${fmt(p.units_for_sale)} til salgs · ${fmt(p.units_sold)} solgt</div>
+      <div class="stat-row">Pris/m²: ${ppm}</div>
+      <div class="stat-row">Solgt siste uke: ${fmt(p.sold_last_week)}</div>
+      <a href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Åpne i Finn</a>
+    </div>
+  `;
 }
 
 document.addEventListener('DOMContentLoaded', init);
