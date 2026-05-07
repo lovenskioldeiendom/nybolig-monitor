@@ -208,3 +208,119 @@ def get_project_history(finn_code: str, days: int = 90) -> list[dict]:
             ORDER BY date
         """, (finn_code, f"-{days} days")).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_current_units(finn_code: str) -> list[dict]:
+    """Henter alle enheter fra siste snapshot for et prosjekt."""
+    with get_conn() as conn:
+        latest = conn.execute(
+            "SELECT MAX(date) FROM unit_snapshots WHERE finn_code = ?",
+            (finn_code,)
+        ).fetchone()[0]
+        if not latest:
+            return []
+        rows = conn.execute("""
+            SELECT unit_id, floor, bra_m2, bedrooms, total_price, sold
+            FROM unit_snapshots
+            WHERE finn_code = ? AND date = ?
+            ORDER BY unit_id
+        """, (finn_code, latest)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_recent_changes(finn_code: str, days_back: int = 30) -> dict:
+    """
+    Returnerer både nylig solgte enheter OG enheter med prisendring siste N dager.
+
+    {
+      "sold": [{"unit_id", "last_seen_price", "bra_m2", "floor", "disappeared_on"}],
+      "price_changes": [{"unit_id", "old_price", "new_price", "change_pct", "changed_on"}],
+    }
+    """
+    with get_conn() as conn:
+        # Nyeste dato
+        latest_date = conn.execute(
+            "SELECT MAX(date) FROM unit_snapshots WHERE finn_code = ?",
+            (finn_code,)
+        ).fetchone()[0]
+        if not latest_date:
+            return {"sold": [], "price_changes": []}
+
+        # Baseline: nyeste snapshot fra eller før (now - days_back)
+        target_date = conn.execute(
+            "SELECT date(?, ?)", (latest_date, f"-{days_back} days")
+        ).fetchone()[0]
+
+        baseline_date = conn.execute("""
+            SELECT date FROM unit_snapshots
+            WHERE finn_code = ? AND date >= ? AND date < ?
+            ORDER BY date ASC LIMIT 1
+        """, (finn_code, target_date, latest_date)).fetchone()
+        if not baseline_date:
+            baseline_date = conn.execute("""
+                SELECT date FROM unit_snapshots
+                WHERE finn_code = ? AND date < ?
+                ORDER BY date DESC LIMIT 1
+            """, (finn_code, target_date)).fetchone()
+        if not baseline_date:
+            return {"sold": [], "price_changes": []}
+        baseline_date = baseline_date[0]
+
+        if baseline_date == latest_date:
+            return {"sold": [], "price_changes": []}
+
+        # Enheter til salgs i baseline (med pris og metadata)
+        baseline_rows = conn.execute("""
+            SELECT unit_id, total_price, bra_m2, floor, bedrooms
+            FROM unit_snapshots
+            WHERE finn_code = ? AND date = ? AND sold = 0
+        """, (finn_code, baseline_date)).fetchall()
+        baseline_map = {r["unit_id"]: dict(r) for r in baseline_rows}
+
+        # Enheter til salgs nå
+        current_rows = conn.execute("""
+            SELECT unit_id, total_price, bra_m2, floor, bedrooms
+            FROM unit_snapshots
+            WHERE finn_code = ? AND date = ? AND sold = 0
+        """, (finn_code, latest_date)).fetchall()
+        current_map = {r["unit_id"]: dict(r) for r in current_rows}
+
+        # Solgt = i baseline men ikke nå
+        sold = []
+        for uid, data in baseline_map.items():
+            if uid not in current_map:
+                sold.append({
+                    "unit_id": uid,
+                    "last_seen_price": data["total_price"],
+                    "bra_m2": data["bra_m2"],
+                    "floor": data["floor"],
+                    "bedrooms": data["bedrooms"],
+                    "disappeared_after": baseline_date,
+                })
+
+        # Prisendring = i begge, men annen pris
+        price_changes = []
+        for uid, current in current_map.items():
+            base = baseline_map.get(uid)
+            if not base:
+                continue  # Ny enhet — ikke en endring
+            old_price = base["total_price"]
+            new_price = current["total_price"]
+            if old_price and new_price and old_price != new_price:
+                change_pct = (new_price - old_price) / old_price * 100
+                price_changes.append({
+                    "unit_id": uid,
+                    "old_price": old_price,
+                    "new_price": new_price,
+                    "change_pct": change_pct,
+                    "bra_m2": current["bra_m2"],
+                    "floor": current["floor"],
+                    "since": baseline_date,
+                })
+
+        # Sorter solgt etter pris (høyest først), endringer etter størrelse
+        sold.sort(key=lambda x: -(x["last_seen_price"] or 0))
+        price_changes.sort(key=lambda x: -abs(x["change_pct"]))
+
+        return {"sold": sold, "price_changes": price_changes}
+
