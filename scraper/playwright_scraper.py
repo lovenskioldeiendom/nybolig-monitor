@@ -151,10 +151,19 @@ def _extract_units_from_dom(page) -> list[dict]:
         const colIdx = {};
         headers.forEach((h, i) => { colIdx[h] = i; });
 
-        const tbody = table.querySelector('tbody') || table;
-        const rows = Array.from(tbody.querySelectorAll('tr')).filter(r => r.querySelectorAll('td, th').length > 0);
+        // Bruk tbody hvis det finnes — hvis ikke, alle tr som IKKE er i thead
+        let rows;
+        const tbody = table.querySelector('tbody');
+        if (tbody) {
+          rows = Array.from(tbody.querySelectorAll('tr'));
+        } else {
+          const thead = table.querySelector('thead');
+          rows = Array.from(table.querySelectorAll('tr')).filter(r => !thead || !thead.contains(r));
+        }
+        rows = rows.filter(r => r.querySelectorAll('td').length > 0);
 
         const units = [];
+        const seenInTable = new Set();
         for (const row of rows) {
           const cells = row.querySelectorAll('td, th');
           const cellText = (key) => {
@@ -164,7 +173,10 @@ def _extract_units_from_dom(page) -> list[dict]:
           };
 
           const unitId = cellText('enhet');
-          if (!unitId) continue;
+          // Hopp over header-aktige rader og duplikater innenfor samme side
+          if (!unitId || unitId.toLowerCase() === 'enhet') continue;
+          if (seenInTable.has(unitId)) continue;
+          seenInTable.add(unitId);
 
           const priceText = cellText('totalpris');
           const sold = priceText.toLowerCase().includes('solgt');
