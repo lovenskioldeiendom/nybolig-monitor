@@ -214,6 +214,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .map-no-coords {
     margin-top: 8px; font-size: 12px; color: var(--text-muted);
   }
+  /* Salgsoversikt */
+  #sales-card { display: none; }
+  #sales-card.open { display: block; }
+  .period-btn { font-weight: 400; }
+  .period-btn.active {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .sales-section { margin-bottom: 1.5rem; }
+  .sales-section:last-child { margin-bottom: 0; }
+  .sales-section-title {
+    font-size: 13px; font-weight: 500; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    margin: 0 0 8px;
+  }
+  .sales-empty {
+    padding: 1rem; text-align: center; color: var(--text-muted);
+    font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -235,6 +253,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="map"></div>
   </div>
 
+  <div class="card" id="sales-card">
+    <h2 style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+      <span>Salgsoversikt</span>
+      <span style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <button class="map-toggle period-btn" data-period="week">Siste uke</button>
+        <button class="map-toggle period-btn" data-period="month">Siste måned</button>
+        <button class="map-toggle period-btn" data-period="year">Siste 12 mnd</button>
+        <button class="download-btn" id="sales-export-btn">Last ned alt (Excel)</button>
+      </span>
+    </h2>
+    <div id="sales-content"></div>
+  </div>
+
   <div class="card">
     <div class="controls">
       <select id="muni-filter">
@@ -242,6 +273,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </select>
       <input id="search" type="search" placeholder="Søk prosjekt..." style="flex: 1; min-width: 180px;">
       <button id="map-toggle" class="map-toggle">Vis kart</button>
+      <button id="sales-toggle" class="map-toggle">Vis salgsoversikt</button>
     </div>
     <div style="overflow-x: auto;">
       <table>
@@ -507,13 +539,26 @@ function init() {
     renderStats();
     renderTable();
     if (mapInitialized) renderMapMarkers();
+    if (salesOpen) renderSalesContent();
   }
 
   sel.addEventListener('change', update);
   document.getElementById('search').addEventListener('input', update);
 
-  // Kart-toggle
   document.getElementById('map-toggle').addEventListener('click', toggleMap);
+  document.getElementById('sales-toggle').addEventListener('click', toggleSales);
+  document.getElementById('sales-export-btn').addEventListener('click', exportAllSales);
+
+  // Period-knapper
+  document.querySelectorAll('.period-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentPeriod = btn.dataset.period;
+      document.querySelectorAll('.period-btn').forEach(b => b.classList.toggle('active', b === btn));
+      renderSalesContent();
+    });
+  });
+  // Aktiver "siste uke" som default
+  document.querySelector('.period-btn[data-period="week"]').classList.add('active');
 
   update();
 }
@@ -621,6 +666,191 @@ function buildPopupHtml(p) {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// === SALGSOVERSIKT ===
+
+let salesOpen = false;
+let currentPeriod = 'week';
+
+function toggleSales() {
+  const card = document.getElementById('sales-card');
+  const btn = document.getElementById('sales-toggle');
+  salesOpen = !card.classList.contains('open');
+  card.classList.toggle('open', salesOpen);
+  btn.textContent = salesOpen ? 'Skjul salgsoversikt' : 'Vis salgsoversikt';
+  if (salesOpen) renderSalesContent();
+}
+
+function aggregateSales(periodKey) {
+  // periodKey: 'week' | 'month' | 'year'
+  const projects = projectsFiltered();
+  const sold = [];
+  const priceChanges = [];
+
+  for (const p of projects) {
+    const ch = (periodKey === 'week') ? p.changes_week
+             : (periodKey === 'month') ? p.changes_month
+             : null;
+    // For "year" har vi ikke data ennå — bygg på siste måned hvis det finnes
+    const source = ch || p.changes_month || {sold: [], price_changes: []};
+
+    for (const s of source.sold) {
+      sold.push({
+        ...s,
+        project_title: p.title,
+        municipality: p.municipality,
+        project_url: p.url,
+      });
+    }
+    for (const c of source.price_changes) {
+      priceChanges.push({
+        ...c,
+        project_title: p.title,
+        municipality: p.municipality,
+        project_url: p.url,
+      });
+    }
+  }
+
+  // Sorter: sold etter pris desc, prisendring etter |%| desc
+  sold.sort((a, b) => (b.last_seen_price || 0) - (a.last_seen_price || 0));
+  priceChanges.sort((a, b) => Math.abs(b.change_pct || 0) - Math.abs(a.change_pct || 0));
+
+  return {sold, priceChanges};
+}
+
+function renderSalesContent() {
+  const {sold, priceChanges} = aggregateSales(currentPeriod);
+  const container = document.getElementById('sales-content');
+
+  if (sold.length === 0 && priceChanges.length === 0) {
+    container.innerHTML = `<div class="sales-empty">
+      Ingen registrerte salg eller prisendringer i perioden.<br>
+      <small style="color: var(--text-faint);">Salg detekteres ved sammenligning mellom snapshots — krever minst to dager med data.</small>
+    </div>`;
+    return;
+  }
+
+  let html = '';
+
+  if (sold.length > 0) {
+    html += `<div class="sales-section">
+      <h3 class="sales-section-title">Solgt (${sold.length})</h3>
+      <table class="unit-table" style="width:100%;">
+        <thead><tr>
+          <th>Prosjekt</th><th>Enhet</th>
+          <th class="num">BRA</th><th class="num">Etasje</th><th class="num">Soverom</th>
+          <th class="num">Pris</th><th class="num">Pris/m²</th><th>Periode</th>
+        </tr></thead>
+        <tbody>
+          ${sold.map(s => {
+            const ppm = (s.last_seen_price && s.bra_m2) ? Math.round(s.last_seen_price / s.bra_m2) : null;
+            const periode = s.disappeared_after && s.disappeared_before
+              ? `${s.disappeared_after} → ${s.disappeared_before}`
+              : (s.disappeared_after || '');
+            return `<tr>
+              <td><div class="muni" style="font-size:10px;">${escapeHtml(s.municipality || '')}</div>
+                  <a href="${escapeHtml(s.project_url)}" target="_blank" rel="noopener">${escapeHtml(s.project_title || '')}</a></td>
+              <td>${escapeHtml(s.unit_id)}</td>
+              <td class="num">${s.bra_m2 ? s.bra_m2 + ' m²' : '–'}</td>
+              <td class="num">${s.floor ?? '–'}</td>
+              <td class="num">${s.bedrooms ?? '–'}</td>
+              <td class="num">${s.last_seen_price ? fmt(s.last_seen_price) + ' kr' : '–'}</td>
+              <td class="num">${ppm ? fmt(ppm) + ' kr' : '–'}</td>
+              <td style="font-size: 11px; color: var(--text-muted);">${escapeHtml(periode)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  }
+
+  if (priceChanges.length > 0) {
+    html += `<div class="sales-section">
+      <h3 class="sales-section-title">Prisendringer (${priceChanges.length})</h3>
+      <table class="unit-table" style="width:100%;">
+        <thead><tr>
+          <th>Prosjekt</th><th>Enhet</th>
+          <th class="num">BRA</th><th class="num">Etasje</th>
+          <th class="num">Gammel pris</th><th class="num">Ny pris</th><th class="num">Endring</th>
+        </tr></thead>
+        <tbody>
+          ${priceChanges.map(c => {
+            const cls = c.change_pct > 0 ? 'change-up' : 'change-down';
+            return `<tr>
+              <td><div class="muni" style="font-size:10px;">${escapeHtml(c.municipality || '')}</div>
+                  <a href="${escapeHtml(c.project_url)}" target="_blank" rel="noopener">${escapeHtml(c.project_title || '')}</a></td>
+              <td>${escapeHtml(c.unit_id)}</td>
+              <td class="num">${c.bra_m2 ? c.bra_m2 + ' m²' : '–'}</td>
+              <td class="num">${c.floor ?? '–'}</td>
+              <td class="num">${fmt(c.old_price)} kr</td>
+              <td class="num">${fmt(c.new_price)} kr</td>
+              <td class="num ${cls}">${fmtPct(c.change_pct)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+function exportAllSales() {
+  const wb = XLSX.utils.book_new();
+
+  for (const [periodKey, periodLabel] of [['week', 'Siste uke'], ['month', 'Siste måned'], ['year', 'Siste 12 mnd']]) {
+    const {sold, priceChanges} = aggregateSales(periodKey);
+
+    if (sold.length > 0) {
+      const rows = [['Kommune', 'Prosjekt', 'Enhet', 'BRA (m²)', 'Etasje', 'Soverom', 'Pris (kr)', 'Pris/m² (kr)', 'Periode start', 'Periode slutt']];
+      for (const s of sold) {
+        const ppm = (s.last_seen_price && s.bra_m2) ? Math.round(s.last_seen_price / s.bra_m2) : '';
+        rows.push([
+          s.municipality || '',
+          s.project_title || '',
+          s.unit_id,
+          s.bra_m2 || '',
+          s.floor ?? '',
+          s.bedrooms ?? '',
+          s.last_seen_price ?? '',
+          ppm,
+          s.disappeared_after || '',
+          s.disappeared_before || '',
+        ]);
+      }
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws['!cols'] = [{wch: 14}, {wch: 36}, {wch: 10}, {wch: 10}, {wch: 8}, {wch: 8}, {wch: 14}, {wch: 12}, {wch: 12}, {wch: 12}];
+      XLSX.utils.book_append_sheet(wb, ws, `Solgt - ${periodLabel}`);
+    }
+
+    if (priceChanges.length > 0) {
+      const rows = [['Kommune', 'Prosjekt', 'Enhet', 'BRA (m²)', 'Etasje', 'Gammel pris (kr)', 'Ny pris (kr)', 'Endring %']];
+      for (const c of priceChanges) {
+        rows.push([
+          c.municipality || '',
+          c.project_title || '',
+          c.unit_id,
+          c.bra_m2 || '',
+          c.floor ?? '',
+          c.old_price ?? '',
+          c.new_price ?? '',
+          c.change_pct?.toFixed(1) ?? '',
+        ]);
+      }
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws['!cols'] = [{wch: 14}, {wch: 36}, {wch: 10}, {wch: 10}, {wch: 8}, {wch: 16}, {wch: 16}, {wch: 12}];
+      XLSX.utils.book_append_sheet(wb, ws, `Prisendring - ${periodLabel}`);
+    }
+  }
+
+  if (wb.SheetNames.length === 0) {
+    alert('Ingen endringer å eksportere.');
+    return;
+  }
+
+  XLSX.writeFile(wb, `salgsoversikt_${DATA.updated || 'ukjent'}.xlsx`);
+}
 </script>
 </body>
 </html>
