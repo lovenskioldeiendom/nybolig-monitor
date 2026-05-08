@@ -296,6 +296,7 @@ def get_recent_changes(finn_code: str, days_back: int = 30) -> dict:
                     "floor": data["floor"],
                     "bedrooms": data["bedrooms"],
                     "disappeared_after": baseline_date,
+                    "disappeared_before": latest_date,
                 })
 
         # Prisendring = i begge, men annen pris
@@ -315,7 +316,9 @@ def get_recent_changes(finn_code: str, days_back: int = 30) -> dict:
                     "change_pct": change_pct,
                     "bra_m2": current["bra_m2"],
                     "floor": current["floor"],
+                    "bedrooms": current["bedrooms"],
                     "since": baseline_date,
+                    "changed_before": latest_date,
                 })
 
         # Sorter solgt etter pris (høyest først), endringer etter størrelse
