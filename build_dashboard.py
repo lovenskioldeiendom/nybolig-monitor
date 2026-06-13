@@ -18,6 +18,7 @@ from scraper.database import (
     get_project_history,
     get_current_units,
     get_recent_changes,
+    get_all_sales_in_period,
 )
 from scraper.geocode import get_cached, _NOT_FOUND
 
@@ -36,6 +37,9 @@ def build_data() -> dict:
         units = get_current_units(finn_code)
         changes_week = get_recent_changes(finn_code, days_back=7)
         changes_month = get_recent_changes(finn_code, days_back=30)
+        sales_week = get_all_sales_in_period(finn_code, days_back=7)
+        sales_month = get_all_sales_in_period(finn_code, days_back=30)
+        sales_year = get_all_sales_in_period(finn_code, days_back=365)
 
         # Hent koordinater fra cache (None hvis ikke geocodet eller ikke funnet)
         lat = lng = None
@@ -66,6 +70,9 @@ def build_data() -> dict:
             "units": units,
             "changes_week": changes_week,
             "changes_month": changes_month,
+            "sales_week": sales_week,
+            "sales_month": sales_month,
+            "sales_year": sales_year,
             "lat": lat,
             "lng": lng,
         })
@@ -688,11 +695,11 @@ function aggregateSales(periodKey) {
   const priceChanges = [];
 
   for (const p of projects) {
-    const ch = (periodKey === 'week') ? p.changes_week
-             : (periodKey === 'month') ? p.changes_month
-             : null;
-    // For "year" har vi ikke data ennå — bygg på siste måned hvis det finnes
-    const source = ch || p.changes_month || {sold: [], price_changes: []};
+    // Bruk de nye full-historie-feltene som samler alle salg i perioden,
+    // ikke bare diff mellom to dager. Fallback til gamle changes_* hvis manglende.
+    const source = (periodKey === 'week') ? (p.sales_week || p.changes_week || {sold: [], price_changes: []})
+                 : (periodKey === 'month') ? (p.sales_month || p.changes_month || {sold: [], price_changes: []})
+                 : (p.sales_year || p.sales_month || p.changes_month || {sold: [], price_changes: []});
 
     for (const s of source.sold) {
       sold.push({
