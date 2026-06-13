@@ -327,3 +327,102 @@ def get_recent_changes(finn_code: str, days_back: int = 30) -> dict:
 
         return {"sold": sold, "price_changes": price_changes}
 
+
+def get_all_sales_in_period(finn_code: str, days_back: int) -> dict:
+    """
+    Returnerer ALLE salg og prisendringer innenfor de siste N dager,
+    ikke bare diff mellom to spesifikke dager.
+
+    Vi går gjennom alle påfølgende snapshot-par i vinduet og samler
+    enheter som forsvinner, samt prisendringer underveis. Slik fanger vi
+    opp salg som skjedde midt i perioden — ikke bare ved kantene.
+    """
+    with get_conn() as conn:
+        latest_date = conn.execute(
+            "SELECT MAX(date) FROM unit_snapshots WHERE finn_code = ?",
+            (finn_code,)
+        ).fetchone()[0]
+        if not latest_date:
+            return {"sold": [], "price_changes": []}
+
+        start_date = conn.execute(
+            "SELECT date(?, ?)", (latest_date, f"-{days_back} days")
+        ).fetchone()[0]
+
+        dates = [r[0] for r in conn.execute("""
+            SELECT DISTINCT date FROM unit_snapshots
+            WHERE finn_code = ? AND date >= ?
+            ORDER BY date ASC
+        """, (finn_code, start_date)).fetchall()]
+
+        if len(dates) < 2:
+            return {"sold": [], "price_changes": []}
+
+        all_sold = []
+        all_price_changes = []
+        seen_sold_ids = set()
+        seen_price_changes = set()
+
+        # Sammenlign hvert påfølgende par av snapshot-dager
+        for i in range(len(dates) - 1):
+            prev_date = dates[i]
+            curr_date = dates[i + 1]
+
+            prev_rows = conn.execute("""
+                SELECT unit_id, total_price, bra_m2, floor, bedrooms
+                FROM unit_snapshots
+                WHERE finn_code = ? AND date = ? AND sold = 0
+            """, (finn_code, prev_date)).fetchall()
+            prev_map = {r["unit_id"]: dict(r) for r in prev_rows}
+
+            curr_rows = conn.execute("""
+                SELECT unit_id, total_price, bra_m2, floor, bedrooms
+                FROM unit_snapshots
+                WHERE finn_code = ? AND date = ? AND sold = 0
+            """, (finn_code, curr_date)).fetchall()
+            curr_map = {r["unit_id"]: dict(r) for r in curr_rows}
+
+            # Solgt = i prev men ikke curr
+            for uid, data in prev_map.items():
+                if uid not in curr_map and uid not in seen_sold_ids:
+                    all_sold.append({
+                        "unit_id": uid,
+                        "last_seen_price": data["total_price"],
+                        "bra_m2": data["bra_m2"],
+                        "floor": data["floor"],
+                        "bedrooms": data["bedrooms"],
+                        "disappeared_after": prev_date,
+                        "disappeared_before": curr_date,
+                    })
+                    seen_sold_ids.add(uid)
+
+            # Prisendring mellom prev og curr
+            for uid, curr in curr_map.items():
+                prev = prev_map.get(uid)
+                if not prev:
+                    continue
+                old_price = prev["total_price"]
+                new_price = curr["total_price"]
+                if old_price and new_price and old_price != new_price:
+                    key = (uid, old_price, new_price)
+                    if key in seen_price_changes:
+                        continue
+                    seen_price_changes.add(key)
+                    change_pct = (new_price - old_price) / old_price * 100
+                    all_price_changes.append({
+                        "unit_id": uid,
+                        "old_price": old_price,
+                        "new_price": new_price,
+                        "change_pct": change_pct,
+                        "bra_m2": curr["bra_m2"],
+                        "floor": curr["floor"],
+                        "bedrooms": curr["bedrooms"],
+                        "since": prev_date,
+                        "changed_before": curr_date,
+                    })
+
+        # Sorter solgt etter dato (nyeste først), endringer likeså
+        all_sold.sort(key=lambda x: x.get("disappeared_after") or "", reverse=True)
+        all_price_changes.sort(key=lambda x: x.get("changed_before") or "", reverse=True)
+
+        return {"sold": all_sold, "price_changes": all_price_changes}
