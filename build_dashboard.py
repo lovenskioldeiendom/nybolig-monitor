@@ -747,14 +747,13 @@ function renderSalesContent() {
         <thead><tr>
           <th>Prosjekt</th><th>Enhet</th>
           <th class="num">BRA</th><th class="num">Etasje</th><th class="num">Soverom</th>
-          <th class="num">Pris</th><th class="num">Pris/m²</th><th>Periode</th>
+          <th class="num">Pris</th><th class="num">Pris/m²</th><th>Salgsdato</th>
         </tr></thead>
         <tbody>
           ${sold.map(s => {
             const ppm = (s.last_seen_price && s.bra_m2) ? Math.round(s.last_seen_price / s.bra_m2) : null;
-            const periode = s.disappeared_after && s.disappeared_before
-              ? `${s.disappeared_after} → ${s.disappeared_before}`
-              : (s.disappeared_after || '');
+            // Salgsdato = siste dag vi så enheten til salgs (dagen før forsvinning)
+            const salgsdato = s.disappeared_after || '';
             return `<tr>
               <td><div class="muni" style="font-size:10px;">${escapeHtml(s.municipality || '')}</div>
                   <a href="${escapeHtml(s.project_url)}" target="_blank" rel="noopener">${escapeHtml(s.project_title || '')}</a></td>
@@ -764,7 +763,7 @@ function renderSalesContent() {
               <td class="num">${s.bedrooms ?? '–'}</td>
               <td class="num">${s.last_seen_price ? fmt(s.last_seen_price) + ' kr' : '–'}</td>
               <td class="num">${ppm ? fmt(ppm) + ' kr' : '–'}</td>
-              <td style="font-size: 11px; color: var(--text-muted);">${escapeHtml(periode)}</td>
+              <td style="font-size: 11px; color: var(--text-muted);">${escapeHtml(salgsdato)}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -810,7 +809,7 @@ function exportAllSales() {
     const {sold, priceChanges} = aggregateSales(periodKey);
 
     if (sold.length > 0) {
-      const rows = [['Kommune', 'Prosjekt', 'Enhet', 'BRA (m²)', 'Etasje', 'Soverom', 'Pris (kr)', 'Pris/m² (kr)', 'Periode start', 'Periode slutt']];
+      const rows = [['Kommune', 'Prosjekt', 'Enhet', 'BRA (m²)', 'Etasje', 'Soverom', 'Pris (kr)', 'Pris/m² (kr)', 'Salgsdato']];
       for (const s of sold) {
         const ppm = (s.last_seen_price && s.bra_m2) ? Math.round(s.last_seen_price / s.bra_m2) : '';
         rows.push([
@@ -823,11 +822,10 @@ function exportAllSales() {
           s.last_seen_price ?? '',
           ppm,
           s.disappeared_after || '',
-          s.disappeared_before || '',
         ]);
       }
       const ws = XLSX.utils.aoa_to_sheet(rows);
-      ws['!cols'] = [{wch: 14}, {wch: 36}, {wch: 10}, {wch: 10}, {wch: 8}, {wch: 8}, {wch: 14}, {wch: 12}, {wch: 12}, {wch: 12}];
+      ws['!cols'] = [{wch: 14}, {wch: 36}, {wch: 10}, {wch: 10}, {wch: 8}, {wch: 8}, {wch: 14}, {wch: 12}, {wch: 12}];
       XLSX.utils.book_append_sheet(wb, ws, `Solgt - ${periodLabel}`);
     }
 
